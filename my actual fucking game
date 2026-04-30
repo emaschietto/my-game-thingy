@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Colombo 1492</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.jsx"></script>
+  </body>
+</html>
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App.jsx";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <App />
+);
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
+import { Button } from "<button>Start</button>";
+import { Card, CardContent } from "<div>...</div>";
+
+type Area = "deck" | "hold" | "quarters";
+type Facing = "left" | "right";
+
+type Mission = {
+  title: string;
+  type: string;
+  goal: number;
+  hint: string;
+};
+
+const WORLD_W = 2200;
+const SHIP_MIN_X = 160;
+const SHIP_MAX_X = 2000;
+const ROOM_MIN_X = 70;
+const ROOM_MAX_X = 830;
+const DEFAULT_VIEW_W = 1280;
+const DEFAULT_VIEW_H = 720;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getPlayerY(area: Area) {
+  if (area === "deck") return 300; // slight lift so feet don't clip
+  if (area === "hold") return 180; // slight lift
+  return 180; // quarters
+}
+
+function getCamera(playerX: number, area: Area, viewW = DEFAULT_VIEW_W, viewH = DEFAULT_VIEW_H) {
+  if (area === "quarters") return { x: 0, y: 0 };
+  const x = clamp(playerX - viewW / 2, 0, Math.max(0, WORLD_W - viewW));
+
+  // Deck and hold are now separate side-scrolling maps.
+  // The hold should NOT be pushed vertically anymore; it already has its own interior layout.
+  // FIX: lower camera so ship is centered properly
+  // FIX: move camera DOWN (positive Y) so ship is visible
+  return { x, y: 180 };
+}
+
+function getObjective(type: string): { x: number; area: Area } {
+  const places: Record<string, { x: number; area: Area }> = {
+    cargo: { x: 520, area: "hold" },
+    cook: { x: 760, area: "hold" },
+    song: { x: 1180, area: "deck" },
+    map: { x: 1550, area: "deck" },
+    diary: { x: 1650, area: "deck" },
+    storm: { x: 1120, area: "deck" },
+    fish: { x: 1970, area: "deck" },
+    sails: { x: 1010, area: "deck" },
+    navigate: { x: 1780, area: "deck" },
+    final: { x: 2050, area: "deck" },
+    sleep: { x: 330, area: "quarters" }
+  };
+  return places[type] || { x: 1000, area: "deck" };
+}
+
+const missionsByDay: Record<number, Mission[]> = {
+  1: [
+    { title: "Carregar comida", type: "cargo", goal: 6, hint: "Esta missão está temporariamente ignorada no BETA." },
+    { title: "Sair do porto", type: "navigate", goal: 5, hint: "Vá até o leme no convés." }
+  ],
+  2: [
+    { title: "Desviar das pedras", type: "navigate", goal: 7, hint: "Três colisões obrigam o conserto do casco." },
+    { title: "Preparar ensopado", type: "cook", goal: 4, hint: "Desça ao porão e use o fogão." }
+  ],
+  3: [
+    { title: "Canção marítima", type: "song", goal: 5, hint: "Cante perto dos marinheiros no convés." },
+    { title: "Ondas gigantes", type: "navigate", goal: 8, hint: "Use o leme para manter o navio estável." }
+  ],
+  4: [
+    { title: "Ler o mapa", type: "map", goal: 3, hint: "Vá até a mesa de mapas na cabine." },
+    { title: "Diário de bordo", type: "diary", goal: 1, hint: "Use a escrivaninha na cabine." }
+  ],
+  5: [
+    { title: "Céu cinza", type: "storm", goal: 6, hint: "Organize os marinheiros correndo no convés." },
+    { title: "Pesca", type: "fish", goal: 5, hint: "Vá até a beirada direita do navio." }
+  ],
+  6: [
+    { title: "Reparar velas", type: "sails", goal: 8, hint: "Vá até as cordas do mastro." },
+    { title: "Seguir estrelas", type: "map", goal: 4, hint: "Use a mesa de mapas." }
+  ],
+  7: [
+    { title: "Avistar terra", type: "navigate", goal: 10, hint: "Mantenha o navio estável até o fim." },
+    { title: "Chegada", type: "final", goal: 1, hint: "Vá até a proa e desembarque." }
+  ]
+};
+
+export default function Colombo1492Beta() {
+  const [screen, setScreen] = useState("home");
+  const [day, setDay] = useState(1);
+  const [challenge, setChallenge] = useState(0);
+  const [crew, setCrew] = useState(12);
+  const [hits, setHits] = useState(0);
+  const [message, setMessage] = useState("Bem-vindo à BETA da viagem de 1492.");
+  const [timer, setTimer] = useState(0);
+  const [showHint, setShowHint] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [playerX, setPlayerX] = useState(270);
+  const [area, setArea] = useState<Area>("deck");
+  const [facing, setFacing] = useState<Facing>("right");
+  const [mustSleep, setMustSleep] = useState(false);
+
+  const keysRef = useRef({ left: false, right: false });
+  const velocityRef = useRef(0);
+  const interactLockRef = useRef(false);
+
+  const viewW = typeof window !== "undefined" ? window.innerWidth : DEFAULT_VIEW_W;
+  const viewH = typeof window !== "undefined" ? window.innerHeight : DEFAULT_VIEW_H;
+  const camera = getCamera(playerX, area, viewW, viewH);
+
+  const curiosities: Record<number, string> = {
+    1: "Curiosidade: Colombo partiu de Palos de la Frontera, na Espanha, em 3 de agosto de 1492.",
+    2: "Curiosidade: a expedição tinha três embarcações: Niña, Pinta e Santa María.",
+    3: "Curiosidade: muitos marinheiros temiam não encontrar terra e ficar sem suprimentos.",
+    4: "Curiosidade: Colombo pensava estar chegando às Índias, mas alcançou ilhas do Caribe.",
+    5: "Curiosidade: tempestades e desorientação eram riscos constantes nas travessias.",
+    6: "Curiosidade: a navegação usava mapas, estrelas, experiência e muita sorte.",
+    7: "Curiosidade: a chegada às Américas mudou profundamente a história do mundo."
+  };
+
+  const missions = useMemo(() => missionsByDay, []);
+  const current = missions[day][challenge];
+  const totalMissionsToday = missions[day].length;
+  const completedMissionsToday = mustSleep ? totalMissionsToday : challenge;
+  const isSunset = completedMissionsToday >= totalMissionsToday / 2 && !mustSleep;
+  const objective = mustSleep ? getObjective("sleep") : getObjective(current.type);
+
+  const nearLadder = area !== "quarters" && Math.abs(playerX - 1040) < 70;
+  const nearQuartersDoor = area === "hold" && Math.abs(playerX - 330) < 90;
+  const nearExitDoor = area === "quarters" && Math.abs(playerX - 90) < 70;
+  const nearObjective = Math.abs(playerX - objective.x) < 95 && area === objective.area;
+
+  useEffect(() => {
+    if (screen !== "game") return;
+    const id = window.setInterval(() => {
+      setTimer(t => {
+        const next = t + 1;
+        if (next > 7) setShowHint(true);
+        return next;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [screen]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (screen !== "game") return;
+      const k = e.key.toLowerCase();
+      if (k === "arrowleft" || k === "a") {
+        keysRef.current.left = true;
+        setFacing("left");
+      }
+      if (k === "arrowright" || k === "d" || k === "w") {
+        keysRef.current.right = true;
+        setFacing("right");
+      }
+      if ((k === " " || k === "e") && !interactLockRef.current) {
+        interactLockRef.current = true;
+        interact();
+      }
+    }
+
+    function onKeyUp(e: KeyboardEvent) {
+      const k = e.key.toLowerCase();
+      if (k === "arrowleft" || k === "a") keysRef.current.left = false;
+      if (k === "arrowright" || k === "d" || k === "w") keysRef.current.right = false;
+      if (k === " " || k === "e") interactLockRef.current = false;
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [screen, playerX, area, nearLadder, nearQuartersDoor, nearExitDoor, nearObjective, mustSleep, progress, current]);
+
+  useEffect(() => {
+    if (screen !== "game") return;
+    let frame = 0;
+
+    function tick() {
+      const keys = keysRef.current;
+      const targetVelocity = keys.left && !keys.right ? -4.2 : keys.right && !keys.left ? 4.2 : 0;
+      const acceleration = targetVelocity === 0 ? 0.28 : 0.18;
+      velocityRef.current += (targetVelocity - velocityRef.current) * acceleration;
+      if (Math.abs(velocityRef.current) < 0.03) velocityRef.current = 0;
+      if (velocityRef.current < 0) setFacing("left");
+      if (velocityRef.current > 0) setFacing("right");
+
+      const min = area === "quarters" ? ROOM_MIN_X : SHIP_MIN_X;
+      const max = area === "quarters" ? ROOM_MAX_X : SHIP_MAX_X;
+      setPlayerX(x => clamp(x + velocityRef.current, min, max));
+      frame = requestAnimationFrame(tick);
+    }
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [screen, area]);
+
+  function resetMission(text = "Nova missão iniciada.") {
+    setProgress(0);
+    setTimer(0);
+    setShowHint(false);
+    setMessage(text);
+  }
+
+  function startGame() {
+    setDay(1);
+    setChallenge(0);
+    setCrew(12);
+    setHits(0);
+    setProgress(0);
+    setPlayerX(270);
+    setArea("deck");
+    setMustSleep(false);
+    setScreen("game");
+    resetMission("Mentor: explore o navio. A escada leva ao porão; a porta do porão leva aos aposentos.");
+  }
+
+  function interact() {
+    if (area === "deck" && nearLadder) {
+      setArea("hold");
+      setPlayerX(1040);
+      setMessage("Você desceu para o porão.");
+      return;
+    }
+    if (area === "hold" && nearLadder) {
+      setArea("deck");
+      setPlayerX(1040);
+      setMessage("Você subiu para o convés.");
+      return;
+    }
+    if (area === "hold" && nearQuartersDoor) {
+      setArea("quarters");
+      setPlayerX(120);
+      setMessage("Você entrou nos aposentos.");
+      return;
+    }
+    if (area === "quarters" && nearExitDoor) {
+      setArea("hold");
+      setPlayerX(330);
+      setMessage("Você saiu dos aposentos e voltou ao porão.");
+      return;
+    }
+    if (mustSleep) {
+      sleepAction();
+      return;
+    }
+    action();
+  }
+
+  function loseCrew(amount: number) {
+    const next = Math.max(0, crew - amount);
+    setCrew(next);
+    if (next <= 0) {
+      setMessage("Todos os marinheiros foram perdidos. A expedição fracassou.");
+      setScreen("gameover");
+    }
+  }
+
+  function completeMission() {
+    if (challenge === 0) {
+      setChallenge(1);
+      setPlayerX(320);
+      setArea("deck");
+      resetMission("Mentor: boa. Agora complete o segundo desafio do dia antes de dormir.");
+    } else {
+      setMustSleep(true);
+      setPlayerX(980);
+      setArea("deck");
+      resetMission("Mentor: o dia acabou. Desça ao porão, entre nos aposentos e durma.");
+    }
+  }
+
+  function sleepAction() {
+    if (!nearObjective) {
+      setMessage("A cama fica nos aposentos. Entre pela porta no porão e siga até a cama.");
+      return;
+    }
+    setMustSleep(false);
+    setScreen("sleep");
+    setMessage(curiosities[day]);
+  }
+
+  function nextDay() {
+    if (day >= 7) {
+      setScreen("victory");
+      return;
+    }
+    setDay(day + 1);
+    setChallenge(0);
+    setHits(0);
+    setPlayerX(320);
+    setArea("deck");
+    setMustSleep(false);
+    setScreen("game");
+    resetMission(`Mentor: Dia ${day + 1}. A travessia fica mais difícil.`);
+  }
+
+  function action() {
+    if (current.type === "cargo") {
+      setMessage("Missão de caixas ignorada por enquanto no BETA.");
+      setProgress(current.goal);
+      setTimeout(completeMission, 350);
+      return;
+    }
+    if (!nearObjective) {
+      setMessage(objective.area === "hold" ? "A missão está no porão." : "Siga até o objetivo correto para interagir.");
+      return;
+    }
+    if (current.type === "diary" || current.type === "final") {
+      setProgress(1);
+      setMessage(current.type === "diary" ? "Diário escrito. A tripulação se acalmou." : "Terra à vista. A travessia foi concluída.");
+      setTimeout(completeMission, 600);
+      return;
+    }
+    const next = progress + 1;
+    setProgress(next);
+    setMessage(`Progresso: ${next}/${current.goal}`);
+    if (next >= current.goal) setTimeout(completeMission, 600);
+  }
+
+  function collision() {
+    const newHits = hits + 1;
+    setHits(newHits);
+    if (newHits >= 3) {
+      setScreen("repair");
+      setMessage("O casco foi danificado! Conserte antes que o navio afunde.");
+    } else {
+      loseCrew(2);
+      setMessage("Colisão! Dois marinheiros foram perdidos.");
+    }
+  }
+
+  function repairSuccess() {
+    setHits(0);
+    setProgress(0);
+    setScreen("game");
+    resetMission("Casco reparado. Continue a missão.");
+  }
+
+  if (screen === "home") {
+    return <FullCenter><Card className="w-full max-w-3xl bg-slate-900 border-slate-700 shadow-2xl rounded-2xl"><CardContent className="p-8 text-center space-y-6"><h1 className="text-4xl font-black tracking-tight">1492: Travessia de Colombo</h1><p className="text-slate-300">BETA 2D lateral — convés, porão e aposentos separados.</p><div className="flex flex-wrap gap-3 justify-center"><Button onClick={startGame}>Start</Button><Button variant="secondary" onClick={() => setScreen("tutorial")}>Tutorial</Button><Button variant="outline" onClick={() => setScreen("credits")}>Créditos</Button></div></CardContent></Card></FullCenter>;
+  }
+
+  if (screen === "tutorial") return <Panel title="Tutorial"><p>Use ← → ou A/D para andar. Segure W para andar para frente. Use Espaço ou E para interagir.</p><p>Escada: convés ↔ porão. Porta no porão: aposentos.</p><Button onClick={startGame}>Começar</Button><Button variant="outline" onClick={() => setScreen("home")}>Voltar</Button></Panel>;
+  if (screen === "credits") return <Panel title="Créditos"><p>Protótipo educacional inspirado na viagem atlântica de 1492.</p><Button onClick={() => setScreen("home")}>Voltar</Button></Panel>;
+  if (screen === "repair") return <Panel title="Consertar o casco"><p>{message}</p><p>Clique três vezes para reparar as tábuas.</p><Button onClick={() => setProgress(p => p + 1)}>Martelar tábua</Button><p>Reparo: {progress}/3</p>{progress >= 3 && <Button onClick={repairSuccess}>Voltar ao mar</Button>}</Panel>;
+  if (screen === "sleep") return <Panel title={`Fim do Dia ${day}`}><p>{message}</p><p>Colombo dorme. A tripulação recupera forças.</p><Button onClick={nextDay}>{day >= 7 ? "Ver final" : "Próximo dia"}</Button></Panel>;
+  if (screen === "gameover") return <Panel title="Derrota"><p>{message}</p><Button onClick={startGame}>Tentar novamente</Button></Panel>;
+  if (screen === "victory") return <Panel title="Vitória"><p>Você completou a BETA da travessia de 1492.</p><p>Tripulação restante: {crew}</p><Button onClick={() => setScreen("home")}>Menu</Button></Panel>;
+
+  return <div className="fixed inset-0 bg-black text-white overflow-hidden select-none">
+    <style>{css}</style>
+    <div className="hud-minimal"><span>Dia {day}</span><span>Missão {challenge + 1}/2: {mustSleep ? "Dormir" : current.title}</span><span>Marinheiros: {crew}</span></div>
+    {area === "quarters" ? <QuartersScene playerX={playerX} facing={facing} nearExitDoor={nearExitDoor} mustSleep={mustSleep} nearBed={nearObjective} /> : area === "hold" ? <HoldScene camera={camera} playerX={playerX} facing={facing} nearLadder={nearLadder} nearQuartersDoor={nearQuartersDoor} crew={crew} /> : <ShipScene camera={camera} isSunset={isSunset} mustSleep={mustSleep} nearLadder={nearLadder} playerX={playerX} facing={facing} crew={crew} currentType={current.type} collision={collision} action={action} />}
+    {showHint && <div className="hint-box">Dica: {mustSleep ? "Entre nos aposentos e durma." : current.hint}</div>}
+  </div>;
+}
+
+function ShipScene({ camera, isSunset, mustSleep, nearLadder, playerX, facing, crew, currentType, collision, action }: any) {
+  return <div className={`game-world ${isSunset ? "sunset" : ""} ${mustSleep ? "night" : ""}`}>
+    <div className="cloud c1" /><div className="cloud c2" /><div className="sun" /><div className="far-water" /><div className="water waveA" /><div className="water waveB" /><div className="water waveC" /><div className="water waveD" />
+    <div className="world-scroll" style={{ transform: `translate(${-camera.x}px, ${-camera.y}px)` }}><div className="ship-big"><div className="mast mast1" /><div className="mast mast2" /><div className="deck-floor" /><div className="rail" /><div className="captain-cabin" /><div className="lower-hull" /><div className="hull-planks" /><div className="portholes" /><div className="ladder" /><div className="ladder-label" style={{ opacity: nearLadder ? 1 : 0 }}>Interaja para descer</div>{Array.from({ length: Math.min(crew, 12) }).map((_, i) => <Npc key={i} i={i} area="deck" />)}<Player x={playerX} area="deck" facing={facing} /></div>{!mustSleep && (currentType === "navigate" || currentType === "storm") && <><button className="rock r1" onClick={collision} aria-label="rocha" /><button className="rock r2" onClick={collision} aria-label="rocha" /><button className="rock r3" onClick={collision} aria-label="rocha" /></>}{!mustSleep && currentType === "fish" && <><button className="fish f1" onClick={action} aria-label="peixe" /><button className="fish f2" onClick={action} aria-label="peixe" /><button className="fish f3" onClick={action} aria-label="peixe" /></>}</div>
+  </div>;
+}
+
+function HoldScene({ camera, playerX, facing, nearLadder, nearQuartersDoor, crew }: any) {
+  return <div className="hold-map">
+    <div className="hold-scroll" style={{ transform: `translateX(${-camera.x}px)` }}>
+      <div className="hold-hull-shell" />
+      <div className="hold-ribs" />
+      <div className="hold-floor" />
+      <div className="hold-beam-top" />
+      {/* FIX: replace door with real ladder */}
+      <div className="hold-ladder" />
+      <div className="hold-ladder-label" style={{ opacity: nearLadder ? 1 : 0 }}>Interaja para subir</div>
+      <div className="hold-quarters-entrance" />
+      <div className="hold-quarters-label" style={{ opacity: nearQuartersDoor ? 1 : 0 }}>Interaja para entrar nos aposentos</div>
+      <div className="cargo-net" />
+      <div className="barrel b1" />
+      <div className="barrel b2" />
+      <div className="barrel b3" />
+      <div className="crate-decor cd1" />
+      <div className="crate-decor cd2" />
+      <div className="crate-decor cd3" />
+      <div className="sack s1" />
+      <div className="sack s2" />
+      <div className="hold-map-lantern" />
+      <div className="hold-map-glow" />
+      {Array.from({ length: Math.min(4, crew) }).map((_, i) => <Npc key={i} i={i + 4} area="hold" />)}
+      <Player x={playerX} area="hold" facing={facing} />
+    </div>
+  </div>;
+}
+
+function QuartersScene({ playerX, facing, nearExitDoor, mustSleep, nearBed }: any) {
+  return <div className={`quarters-map ${mustSleep ? "night" : ""}`}><div className="quarters-back-wall" /><div className="quarters-floor" /><div className="quarters-window" /><div className="quarters-exit" /><div className="quarters-exit-label" style={{ opacity: nearExitDoor ? 1 : 0 }}>Interaja para sair</div><div className="quarters-bed-big" /><div className="quarters-table-big" /><div className="quarters-chair" /><div className="quarters-lantern" /><div className="quarters-lantern-glow" /><div className="sleep-label" style={{ opacity: mustSleep && nearBed ? 1 : 0 }}>Interaja para dormir</div><Player x={playerX} area="quarters" facing={facing} /></div>;
+}
+
+function Player({ x, area, facing }: { x: number; area: Area; facing: Facing }) {
+  return <div className={`player ${facing}`} style={{ left: x, bottom: getPlayerY(area) }}><div className="p-hat" /><div className="p-feather" /><div className="p-face" /><div className="p-eye e1" /><div className="p-eye e2" /><div className="p-nose" /><div className="p-beard" /><div className="p-body" /><div className="p-coat" /><div className="p-arm a1" /><div className="p-arm a2" /><div className="p-leg l1" /><div className="p-leg l2" /></div>;
+}
+
+function Npc({ i, area = "deck" }: { i: number; area?: Area }) {
+  const jobs = ["swab", "carry", "rope", "lookout", "cook", "pace", "crate", "sleepy", "map", "repair", "talk", "guard"];
+  const job = jobs[i % jobs.length];
+  const positions: Record<string, { x: number; y: number; travel: number }> = { swab: { x: 520, y: 290, travel: 90 }, carry: { x: 720, y: 72, travel: 130 }, rope: { x: 930, y: 290, travel: 20 }, lookout: { x: 1220, y: 290, travel: 0 }, cook: { x: 760, y: 170, travel: 10 }, pace: { x: 1380, y: 290, travel: 160 }, crate: { x: 450, y: 170, travel: 70 }, sleepy: { x: 315, y: 170, travel: 8 }, map: { x: 1545, y: 290, travel: 10 }, repair: { x: 1680, y: 170, travel: 30 }, talk: { x: 1120, y: 290, travel: 45 }, guard: { x: 1880, y: 290, travel: 50 } };
+  const base = positions[job];
+  const p = { ...base, y: area === "deck" ? 290 : area === "hold" ? 170 : base.y };
+  const movingJobs = ["swab", "carry", "pace", "crate", "guard", "talk"];
+  const animate = movingJobs.includes(job) ? { left: [p.x, p.x + p.travel, p.x] } : { y: [0, -4, 0] };
+  return <motion.div className={`npc npc${i % 3} job-${job}`} initial={{ left: p.x }} animate={animate} transition={{ repeat: Infinity, duration: 2.2 + (i % 4) * 0.55, delay: (i % 5) * 0.18 }} style={{ bottom: p.y }}>
+  {/* FIX: prevent floating bug by forcing ground alignment */}<div className="npc-tool" /><div className="n-hair" /><div className="n-head" /><div className="n-eye e1" /><div className="n-eye e2" /><div className="n-body" /><div className="n-arm a1" /><div className="n-arm a2" /><div className="n-leg l1" /><div className="n-leg l2" /></motion.div>;
+}
+
+function FullCenter({ children }: { children: React.ReactNode }) { return <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6">{children}</div>; }
+function Panel({ title, children }: { title: string; children: React.ReactNode }) { return <FullCenter><Card className="w-full max-w-2xl bg-slate-900 border-slate-700 rounded-2xl shadow-2xl"><CardContent className="p-8 text-center space-y-5"><h1 className="text-3xl font-bold">{title}</h1><div className="space-y-4 text-slate-200">{children}</div></CardContent></Card></FullCenter>; }
+
+function runLogicTests() {
+  console.assert(clamp(5, 0, 10) === 5, "clamp keeps values inside range");
+  console.assert(clamp(-1, 0, 10) === 0, "clamp applies minimum");
+  console.assert(clamp(11, 0, 10) === 10, "clamp applies maximum");
+  console.assert(getObjective("cargo").area === "hold", "cargo objective should be in hold");
+  console.assert(getObjective("navigate").area === "deck", "navigate objective should be on deck");
+  console.assert(getObjective("sleep").area === "quarters", "sleep objective should be in quarters");
+  console.assert(getPlayerY("deck") > getPlayerY("hold"), "deck should render above hold");
+  console.assert(getCamera(270, "hold", 1280, 720).y === 0, "hold camera should not be vertically offset because it is a separate interior map");
+  console.assert(getCamera(1800, "hold", 1280, 720).x > getCamera(270, "hold", 1280, 720).x, "hold camera should follow player horizontally");
+  console.assert(getCamera(300, "quarters", 1280, 720).x === 0, "quarters camera should be fixed");
+  console.assert(missionsByDay[1].length === 2, "day 1 should have two missions");
+  console.assert(getPlayerY("deck") === 290 && getPlayerY("hold") === 170, "deck and hold ground lines should be stable");
+}
+if (typeof window !== "undefined") runLogicTests();
+
+const css = `
+*{image-rendering:pixelated}.hud-minimal{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:80;background:rgba(2,6,23,.72);border:3px solid rgba(250,204,21,.75);box-shadow:0 4px 0 rgba(0,0,0,.35);padding:8px 16px;border-radius:10px;display:flex;gap:22px;font-weight:900;color:#f8fafc;text-shadow:2px 2px #000;font-size:14px}.hint-box{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);z-index:90;background:#111827;color:#facc15;border:3px solid #facc15;border-radius:10px;padding:8px 14px;font-weight:800}.game-world{position:absolute;inset:0;overflow:hidden;background:linear-gradient(#71cfff 0%,#3c91d5 45%,#0e4e83 46%,#08294d 100%)}.game-world.sunset{background:linear-gradient(#f5a45b 0%,#8b5e8d 42%,#15466e 48%,#08294d 100%)}.game-world.night{background:linear-gradient(#0b1020 0%,#0a1a3a 50%,#020617 100%)}.game-world.night .sun{display:none}.world-scroll{position:absolute;left:0;top:0;width:2200px;height:900px;transition:transform .14s ease-out}.sun{position:absolute;right:8vw;top:6vh;width:90px;height:90px;border-radius:999px;background:#ffd56a;box-shadow:0 0 50px #ffd56a}.cloud{position:absolute;width:160px;height:38px;background:white;opacity:.75;border-radius:40px}.cloud:before,.cloud:after{content:"";position:absolute;background:white;border-radius:999px}.cloud:before{width:65px;height:65px;left:18px;top:-30px}.cloud:after{width:78px;height:78px;right:18px;top:-40px}.c1{left:10vw;top:10vh}.c2{left:60vw;top:18vh}.far-water{position:absolute;left:0;right:0;bottom:0;height:46%;background:linear-gradient(#10578f,#06345f)}.water{position:absolute;left:-10%;right:-10%;bottom:4vh;height:35px;opacity:.55;background:repeating-linear-gradient(90deg,transparent 0 24px,rgba(255,255,255,.7) 25px 42px,transparent 43px 80px);animation:waves 3s linear infinite}.waveB{bottom:9vh;opacity:.32;animation-duration:5s}.waveC{bottom:14vh;opacity:.25;animation-duration:7s}.waveD{bottom:18vh;opacity:.18;animation-duration:9s}@keyframes waves{from{transform:translateX(0)}to{transform:translateX(80px)}}
+.ship-big{position:absolute;left:60px;top:200px;width:2100px;height:700px;animation:shipBob 3.8s ease-in-out infinite}@keyframes shipBob{0%,100%{transform:translateY(0)}50%{transform:translateY(8px)}}.lower-hull{position:absolute;left:70px;right:70px;bottom:0;height:250px;background:linear-gradient(#b36b32,#8a4b24 45%,#5c2c14);border:10px solid #2b160c;border-bottom-left-radius:360px 150px;border-bottom-right-radius:360px 150px;border-top-left-radius:28px;border-top-right-radius:28px;box-shadow:0 22px 0 rgba(0,0,0,.25)}.lower-hull:before{content:"";position:absolute;left:-48px;top:25px;width:130px;height:170px;background:#8a4b24;border-left:10px solid #2b160c;border-bottom:10px solid #2b160c;transform:skewX(-18deg);border-bottom-left-radius:90px}.lower-hull:after{content:"";position:absolute;right:-58px;top:30px;width:145px;height:165px;background:#7a3e1d;border-right:10px solid #2b160c;border-bottom:10px solid #2b160c;transform:skewX(22deg);border-bottom-right-radius:120px}.hull-planks{position:absolute;left:110px;right:110px;bottom:42px;height:175px;background:repeating-linear-gradient(0deg,transparent 0 31px,rgba(45,22,12,.75) 32px 38px),repeating-linear-gradient(90deg,transparent 0 95px,rgba(45,22,12,.55) 96px 102px);border-radius:0 0 220px 220px}.deck-floor{position:absolute;left:120px;right:120px;bottom:250px;height:52px;background:repeating-linear-gradient(90deg,#d0924d 0 90px,#5e3219 91px 100px);border:8px solid #2b160c}.rail{position:absolute;left:140px;right:140px;bottom:311px;height:54px;background:repeating-linear-gradient(90deg,#3a1c0d 0 12px,#c0803a 13px 42px);border:6px solid #2b160c}.captain-cabin{position:absolute;right:210px;bottom:305px;width:330px;height:155px;background:#9a5627;border:9px solid #2b160c}.captain-cabin:before{content:"";position:absolute;left:35px;top:38px;width:65px;height:55px;background:#102a43;border:6px solid #e2b46f;box-shadow:115px 0 0 #102a43,115px 0 0 6px #e2b46f}.captain-cabin:after{content:"";position:absolute;left:-15px;right:-15px;top:-42px;height:45px;background:#5c2c14;border:7px solid #2b160c;border-radius:8px}.mast{position:absolute;width:24px;background:#4a240f;border:5px solid #2b160c}.mast1{left:870px;bottom:300px;height:420px}.mast2{left:1220px;bottom:300px;height:520px}.portholes{position:absolute;left:250px;bottom:95px;width:1420px;height:40px;background:repeating-radial-gradient(circle at 20px 20px,#0f2b46 0 16px,#d09b55 17px 23px,transparent 24px 120px)}.ladder{position:absolute;left:1000px;bottom:80px;width:80px;height:265px;background:repeating-linear-gradient(0deg,transparent 0 24px,#7c4a23 25px 35px),linear-gradient(90deg,transparent 0 15px,#3a1c0d 16px 25px,transparent 26px 55px,#3a1c0d 56px 65px,transparent 66px)}.ladder-label{position:absolute;left:930px;bottom:365px;background:#111827;color:#facc15;border:3px solid #facc15;padding:7px 12px;border-radius:6px;font-weight:800;z-index:45}.rock{position:absolute;bottom:8vh;width:85px;height:60px;background:#475569;border:6px solid #1e293b;clip-path:polygon(15% 100%,0 45%,28% 12%,55% 0,100% 50%,85% 100%)}.r1{left:380px}.r2{left:1230px}.r3{left:1840px}.fish{position:absolute;bottom:11vh;width:52px;height:28px;background:#38bdf8;border:5px solid #075985;border-radius:50%}.fish:after{content:"";position:absolute;right:-20px;top:4px;width:22px;height:16px;background:#38bdf8;clip-path:polygon(0 50%,100% 0,100% 100%)}.f1{left:900px}.f2{left:1420px;bottom:16vh}.f3{left:1900px}
+.hold-map{position:absolute;inset:0;overflow:hidden;background:linear-gradient(#080503,#020101)}.hold-scroll{position:absolute;left:0;top:0;width:2200px;height:100%;transition:transform .14s ease-out}.hold-hull-shell{position:absolute;left:-80px;right:-80px;bottom:0;height:520px;background:radial-gradient(ellipse at center bottom,#5b3218 0%,#2d180c 48%,#100804 78%);border-top:16px solid #1f0f07;box-shadow:inset 0 70px 120px rgba(0,0,0,.55)}.hold-ribs{position:absolute;left:80px;right:80px;top:95px;height:410px;background:repeating-linear-gradient(90deg,transparent 0 115px,#1a0c05 116px 132px,transparent 133px 220px);opacity:.9}.hold-floor{position:absolute;left:0;right:0;bottom:0;height:170px;background:repeating-linear-gradient(90deg,#654020 0 100px,#2b160c 101px 112px);border-top:10px solid #2b160c}.hold-beam-top{position:absolute;left:70px;right:70px;top:120px;height:34px;background:repeating-linear-gradient(90deg,#3a1c0d 0 120px,#160903 121px 138px);border:6px solid #160903}.hold-ladder{position:absolute;left:1000px;bottom:170px;width:70px;height:200px;background:repeating-linear-gradient(0deg,transparent 0 20px,#7c4a23 21px 30px),linear-gradient(90deg,transparent 0 12px,#3a1c0d 13px 20px,transparent 21px 50px,#3a1c0d 51px 58px,transparent 59px)}.hold-ladder-door:after{content:"";position:absolute;left:35px;top:25px;width:28px;height:110px;background:repeating-linear-gradient(0deg,transparent 0 18px,#a16207 19px 27px),linear-gradient(90deg,transparent 0 8px,#3a1c0d 9px 15px,transparent 16px 34px,#3a1c0d 35px 41px,transparent 42px)}.hold-quarters-entrance{position:absolute;left:255px;bottom:168px;width:140px;height:145px;background:#060302;border:8px solid #5c2c14;border-radius:65px 65px 0 0}.hold-ladder-label,.hold-quarters-label{position:absolute;background:#111827;color:#facc15;border:3px solid #facc15;padding:7px 12px;border-radius:6px;font-weight:800;z-index:60}.hold-ladder-label{left:930px;bottom:350px}.hold-quarters-label{left:190px;bottom:338px}.cargo-net{position:absolute;left:1250px;bottom:220px;width:240px;height:110px;background:repeating-linear-gradient(45deg,transparent 0 18px,rgba(202,138,4,.55) 19px 23px),repeating-linear-gradient(-45deg,transparent 0 18px,rgba(202,138,4,.55) 19px 23px);border:6px solid #713f12}.hold-map-lantern{position:absolute;left:760px;top:185px;width:24px;height:34px;background:#facc15;border:4px solid #78350f;border-radius:7px;animation:flicker .7s infinite alternate}.hold-map-glow{position:absolute;left:670px;top:120px;width:220px;height:220px;background:radial-gradient(circle,rgba(250,204,21,.28),transparent 70%)}.barrel{position:absolute;bottom:170px;width:60px;height:70px;background:#875126;border:6px solid #3a1c0d;border-radius:18px}.b1{left:700px}.b2{left:1420px}.b3{left:1500px}.crate-decor{position:absolute;bottom:170px;width:70px;height:58px;background:#9b5a2b;border:6px solid #3a1c0d}.cd1{left:650px}.cd2{left:1400px}.cd3{left:1500px}.sack{position:absolute;bottom:170px;width:55px;height:55px;background:#c7a66b;border:5px solid #604019;border-radius:22px 22px 12px 12px}.s1{left:820px}.s2{left:890px}
+.quarters-map{position:absolute;inset:0;overflow:hidden;background:linear-gradient(#130d08,#070403)}.quarters-map.night{background:linear-gradient(#080b16,#03040a)}.quarters-back-wall{position:absolute;left:80px;right:80px;top:120px;height:360px;background:repeating-linear-gradient(90deg,#2d1a0e 0 82px,#1c1008 83px 92px);border:10px solid #3a1c0d}.quarters-floor{position:absolute;left:0;right:0;bottom:0;height:200px;background:repeating-linear-gradient(90deg,#6d3d1f 0 100px,#2b160c 101px 112px);border-top:10px solid #2b160c}.quarters-window{position:absolute;left:620px;top:190px;width:120px;height:82px;background:#071b33;border:8px solid #c0843d}.quarters-exit{position:absolute;left:55px;bottom:200px;width:95px;height:155px;background:#1a0f08;border:8px solid #8a4b24;border-radius:8px 8px 0 0}.quarters-exit:after{content:"";position:absolute;right:12px;top:76px;width:10px;height:10px;background:#facc15;border-radius:50%}.quarters-exit-label,.sleep-label{position:absolute;background:#111827;color:#facc15;border:3px solid #facc15;padding:7px 12px;border-radius:6px;font-weight:800;z-index:60}.quarters-exit-label{left:38px;bottom:360px}.sleep-label{left:245px;bottom:350px}.quarters-bed-big{position:absolute;left:250px;bottom:200px;width:285px;height:82px;background:#5b2a16;border:7px solid #2b160c;border-radius:10px;box-shadow:0 8px 0 rgba(0,0,0,.25)}.quarters-bed-big:before{content:"";position:absolute;left:14px;top:-22px;width:62px;height:32px;background:#f8fafc;border:5px solid #94a3b8;border-radius:7px}.quarters-bed-big:after{content:"";position:absolute;left:82px;right:10px;top:8px;height:50px;background:linear-gradient(#2563eb,#1e3a8a);border:4px solid #0f172a;border-radius:7px}.quarters-table-big{position:absolute;left:575px;bottom:200px;width:170px;height:70px;background:#7b471f;border:7px solid #301608;border-radius:6px}.quarters-chair{position:absolute;left:760px;bottom:200px;width:55px;height:75px;background:#5c2c14;border:6px solid #2b160c}.quarters-lantern{position:absolute;left:455px;top:170px;width:24px;height:34px;background:#facc15;border:4px solid #78350f;border-radius:7px;animation:flicker .7s infinite alternate}.quarters-lantern-glow{position:absolute;left:360px;top:110px;width:220px;height:220px;background:radial-gradient(circle,rgba(250,204,21,.35),transparent 70%)}@keyframes flicker{from{filter:brightness(.85)}to{filter:brightness(1.25)}}
+.player{position:absolute;width:42px;height:86px;margin-left:-21px;z-index:50;transition:bottom .08s linear}.player.left{transform:scaleX(-1)}.p-hat{position:absolute;left:2px;top:0;width:38px;height:13px;background:#3b2414;border:3px solid #160b05}.p-feather{position:absolute;right:-7px;top:-10px;width:8px;height:22px;background:#f1c40f;border:2px solid #6b3f00}.p-face,.n-head{position:absolute;background:#d6a06b;border:3px solid #5d3319}.p-face{left:8px;top:13px;width:28px;height:27px}.p-eye,.n-eye{position:absolute;width:4px;height:4px;background:#111}.p-eye{top:23px}.p-eye.e1{left:16px}.p-eye.e2{left:27px}.p-nose{position:absolute;left:23px;top:29px;width:6px;height:5px;background:#a66b43}.p-beard{position:absolute;left:12px;top:36px;width:22px;height:8px;background:#4a240f}.p-body{position:absolute;left:6px;top:44px;width:31px;height:30px;background:#7f1d1d;border:4px solid #2b0b0b}.p-coat{position:absolute;left:17px;top:46px;width:9px;height:28px;background:#f8fafc}.p-arm{position:absolute;top:48px;width:10px;height:26px;background:#d6a06b;border:3px solid #5d3319}.a1{left:-2px}.a2{right:-2px}.p-leg{position:absolute;top:72px;width:12px;height:22px;background:#1e3a8a;border:2px solid #0f172a}.p-leg.l1{left:8px}.p-leg.l2{right:8px}.npc{position:absolute;width:42px;height:86px;z-index:18;transform:translateY(0)}.n-hair{position:absolute;left:8px;top:0;width:28px;height:9px;background:#2b160c}.n-head{left:7px;top:8px;width:28px;height:27px}.n-eye{top:20px}.n-eye.e1{left:17px}.n-eye.e2{left:27px}.n-body{position:absolute;left:6px;top:39px;width:30px;height:30px;background:#334155;border:4px solid #0f172a}.npc1 .n-body{background:#166534}.npc2 .n-body{background:#92400e}.n-arm{position:absolute;top:43px;width:10px;height:27px;background:#c98f5d;border:3px solid #5d3319}.n-arm.a1{left:-3px}.n-arm.a2{right:-3px}.n-leg{position:absolute;top:68px;width:12px;height:22px;background:#111827;border:2px solid #020617}.n-leg.l1{left:7px}.n-leg.l2{right:7px}.npc-tool{position:absolute;display:none}.job-swab .npc-tool{display:block;left:32px;top:50px;width:8px;height:70px;background:#d6a15f;transform:rotate(-35deg)}.job-carry .npc-tool,.job-crate .npc-tool{display:block;left:30px;top:42px;width:34px;height:30px;background:#9b5a2b;border:4px solid #3a1c0d}.job-rope .npc-tool,.job-repair .npc-tool{display:block;left:26px;top:-30px;width:8px;height:90px;background:repeating-linear-gradient(#a16207 0 8px,#713f12 9px 15px)}.job-lookout .npc-tool{display:block;left:22px;top:-26px;width:36px;height:18px;border:5px solid #111827;border-left:none;border-right:none;background:#64748b}.job-cook .npc-tool{display:block;left:27px;top:44px;width:32px;height:24px;background:#1f2937;border:4px solid #020617;border-radius:50%}
+`;
+{
+  "name": "colombo-game",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "framer-motion": "^10.16.4"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+});
